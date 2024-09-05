@@ -1,0 +1,82 @@
+name: Deploy Alloy Samples
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: 'Specific sample to deploy (leave empty to deploy all)'
+        required: false
+        type: choice
+        options:
+          - ajo-content-cards
+          - ajo-in-app-messages
+          - ajo-personalization-client-side
+          - ajo-personalization-hybrid
+          - ajo-personalization-server-side
+          - ajo-proposition-interaction-tracking
+          - target-personalization-client-side
+          - target-personalization-hybrid
+          - target-personalization-hybrid-spa
+          - target-personalization-server-side
+          - target-top-and-bottom
+          - media-collection
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event.inputs.sample }}" != "" ]; then
+            echo "matrix={\"include\":[{\"sample\":\"${{ github.event.inputs.sample }}\"}]}" >> $GITHUB_OUTPUT
+          else
+            echo "matrix={\"include\":[{\"sample\":\"ajo-content-cards\"},{\"sample\":\"ajo-in-app-messages\"},{\"sample\":\"ajo-personalization-client-side\"},{\"sample\":\"ajo-personalization-hybrid\"},{\"sample\":\"ajo-personalization-server-side\"},{\"sample\":\"ajo-proposition-interaction-tracking\"},{\"sample\":\"target-personalization-client-side\"},{\"sample\":\"target-personalization-hybrid\"},{\"sample\":\"target-personalization-hybrid-spa\"},{\"sample\":\"target-personalization-server-side\"},{\"sample\":\"target-top-and-bottom\"},{\"sample\":\"media-collection\"}]}" >> $GITHUB_OUTPUT
+          fi
+
+  deploy:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.setup.outputs.matrix)}}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Docker Login to ACR
+      run: |
+        az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+    - name: Set environment variables
+      run: |
+        echo "BASE_PATH=/$(echo ${{ matrix.sample }} | cut -d'-' -f2-)" >> $GITHUB_ENV
+        if [[ "${{ matrix.sample }}" == ajo-* ]]; then
+          echo "APP_DOMAIN=ajo.alloyio.com" >> $GITHUB_ENV
+          echo "COMPOSE_FILE=docker/ajo.yml" >> $GITHUB_ENV
+        elif [[ "${{ matrix.sample }}" == target-* ]]; then
+          echo "APP_DOMAIN=target.alloyio.com" >> $GITHUB_ENV
+          echo "COMPOSE_FILE=docker/target.yml" >> $GITHUB_ENV
+        elif [[ "${{ matrix.sample }}" == media-* ]]; then
+          echo "APP_DOMAIN=media.alloyio.com" >> $GITHUB_ENV
+          echo "COMPOSE_FILE=docker/media.yml" >> $GITHUB_ENV
+        fi
+    - name: Build and push Docker image
+      env:
+        IMAGE_NAME: ${{ matrix.sample }}
+      run: |
+        docker-compose -f ${{ env.COMPOSE_FILE }} build ${{ matrix.sample }}
+        docker-compose -f ${{ env.COMPOSE_FILE }} push ${{ matrix.sample }}
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ matrix.sample }}
+        publish-profile: ${{ secrets[format('{0}_PUBLISH_PROFILE', matrix.sample)] }}
+        images: ${{ secrets.AZURE_CONTAINER_REGISTRY }}/${{ matrix.sample }}:latest
